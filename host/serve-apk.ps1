@@ -1,13 +1,19 @@
-# serve-apk.ps1 -- 把 APK 直接送到平板：主机上起一个单文件的 HTTP 下载页。
-# 只服务 build\alttabpipe.apk 这一个文件，别的一概 404。Ctrl+C 结束。
+# serve-apk.ps1 -- hand the APK to the tablet over HTTP from the host.
+# Serves exactly one file (plus a one-line index page); everything else is 404.
+#
+#   .\serve-apk.ps1
+#   .\serve-apk.ps1 -Port 8080
+#
+# Keep this file ASCII-only: Windows PowerShell 5.1 reads .ps1 without a BOM as ANSI,
+# so non-ASCII text can break string literals.
 param(
     [int]$Port = 47824,
-    [string]$Apk = "$PSScriptRoot\alttabpipe\build\alttabpipe.apk"
+    [string]$Apk = (Join-Path $PSScriptRoot "..\build\shortcut-passthrough.apk")
 )
 
-if (-not (Test-Path $Apk)) { throw "APK 不存在: $Apk" }
+if (-not (Test-Path $Apk)) { throw "APK not found: $Apk" }
 $bytes = [System.IO.File]::ReadAllBytes($Apk)
-$name = "alttabpipe.apk"
+$name  = 'shortcut-passthrough.apk'
 
 $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::IPv6Any, $Port)
 $listener.Server.SetSocketOption([System.Net.Sockets.SocketOptionLevel]::IPv6,
@@ -16,11 +22,11 @@ $listener.Start()
 
 $addrs = Get-NetIPAddress -AddressFamily IPv4, IPv6 -ErrorAction SilentlyContinue |
     Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '::1' -and $_.AddressState -eq 'Preferred' }
-Write-Host "服务: $Apk  ($([math]::Round($bytes.Length/1KB,1)) KB)" -ForegroundColor Cyan
-Write-Host "在平板浏览器里打开下面任意一条（IPv6 要用方括号）：" -ForegroundColor Cyan
+Write-Host "file: $Apk  ($([math]::Round($bytes.Length/1KB,1)) KB)"
+Write-Host "open one of these in the tablet browser (IPv6 needs brackets):"
 foreach ($a in $addrs) {
-    $host_ = if ($a.IPAddress -like '*:*') { "[" + ($a.IPAddress -split '%')[0] + "]" } else { $a.IPAddress }
-    Write-Host ("  http://" + $host_ + ":" + $Port + "/") -ForegroundColor Green
+    $h = if ($a.IPAddress -like '*:*') { "[" + ($a.IPAddress -split '%')[0] + "]" } else { $a.IPAddress }
+    Write-Host ("  http://" + $h + ":" + $Port + "/")
 }
 Write-Host "Use an address the tablet can actually reach; virtual/tunnel adapters usually cannot."
 
@@ -42,8 +48,9 @@ while ($true) {
 
         if ($path -eq "/" -or $path -eq "/index.html") {
             $html = "<html><meta charset=utf-8><body style='font-family:sans-serif;padding:24px'>" +
-                    "<h2>AltTab 直通</h2><p><a href=/$name>下载 $name</a>（$([math]::Round($bytes.Length/1KB,1)) KB）</p>" +
-                    "<p style='color:#666'>装完打开应用 → 填主机地址 → 打开无障碍并开启「AltTab 直通」</p></body></html>"
+                    "<h2>Shortcut Passthrough</h2><p><a href=/$name>Download $name</a> " +
+                    "($([math]::Round($bytes.Length/1KB,1)) KB)</p>" +
+                    "<p style='color:#666'>Install, set the host address, then enable the accessibility service.</p></body></html>"
             $body = [System.Text.Encoding]::UTF8.GetBytes($html)
             $head = "HTTP/1.1 200 OK`r`nContent-Type: text/html; charset=utf-8`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n"
         } elseif ($path -eq "/$name") {
