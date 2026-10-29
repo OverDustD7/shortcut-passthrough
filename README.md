@@ -4,9 +4,21 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Forward Alt+Tab and every Win-key combination from an Android tablet's physical keyboard to a Windows host, without root and without touching the remote-desktop client. The tablet keeps showing the stream instead of jumping to its own recents screen.
+Forward Alt+Tab and every Win-key combination from an Android tablet's physical keyboard to a Windows host, without root and without touching Moonlight or any other remote-desktop client. The tablet keeps showing the stream instead of jumping to its own recents screen.
 
-The Android input dispatcher consumes Alt+Tab at `interceptKeyBeforeDispatching` and Win combinations even earlier, at `interceptKeyBeforeQueueing`, so a remote-desktop client never receives them. This app sits on the accessibility key filter, which runs between those two stages: it swallows the keys there, sends them over UDP, and a host script replays them with `keybd_event`.
+The Android input dispatcher consumes Alt+Tab at `interceptKeyBeforeDispatching` and Win combinations even earlier, at `interceptKeyBeforeQueueing`, so a remote-desktop client never receives them.
+
+## Why this exists
+
+There is no setting for this in Moonlight, because Moonlight never gets the chance. The keys are gone before any app sees them:
+
+- **Alt+Tab** is bound by Android itself to the recent-apps switcher. Pressing it opens the tablet's own task switcher, the remote-desktop window loses focus, and the stream stalls. The client is not misconfigured; the event never reaches it.
+- **Win combinations** (Win, Win+D, Win+E, Win+Shift+S and the rest) are consumed during system-level key handling. Ordinary apps, remote-desktop clients included, are not in the chain at that point.
+- Moonlight's in-app "send special keys" panel is the one workaround that works, because the client synthesises the keystroke itself. It needs a tap on the screen, and a physical key press still takes the path described above.
+
+So what is missing is not a checkbox but the ability to take the key **before the system consumes it**. This project adds exactly that layer. The tablet side intercepts the keys, the host side presses the real thing. No root, no client changes.
+
+Implementation: the app sits on the accessibility key filter, which runs between those two stages. It swallows the keys there, sends them over UDP, and a host script replays them with `keybd_event`.
 
 ## Requirements
 
