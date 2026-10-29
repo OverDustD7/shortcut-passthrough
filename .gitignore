@@ -1,0 +1,14 @@
+# build output
+build/
+*.apk
+*.keystore
+
+# logs
+*.log
+
+# local notes / scratch (never publish)
+.migration/
+.hdrprobe/
+.keytest/
+.kt/
+*.bak
