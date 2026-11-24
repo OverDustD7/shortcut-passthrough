@@ -63,6 +63,11 @@ public final class ReleaseSafeQueue {
         return q.size();
     }
 
+    public void clear() {
+        q.clear();
+        resyncNeeded = false;
+    }
+
     public int drops() {
         return drops;
     }

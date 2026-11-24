@@ -12,8 +12,6 @@ import android.util.Log;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
 
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
 import java.net.InetAddress;
 
 /**
@@ -71,8 +69,18 @@ public class AltTabPipeService extends AccessibilityService {
     private volatile boolean running = false;
     private volatile boolean shuttingDown = false;
 
-    private volatile String host = "";
-    private volatile int port = DEFAULT_PORT;
+    private static final class Peer {
+        final String host;
+        final int port;
+        final String code;
+        Peer(String host, int port, String code) {
+            this.host = host;
+            this.port = port;
+            this.code = code;
+        }
+    }
+    private volatile Peer peer = new Peer("", DEFAULT_PORT, "");
+    private volatile Peer authenticatedPeer;
     private volatile String targetSpec = DEFAULT_TARGETS;
     private volatile String[] targets = new String[]{DEFAULT_TARGETS};
 
@@ -82,16 +90,11 @@ public class AltTabPipeService extends AccessibilityService {
     private final Runnable guardTask = new Runnable() {
         @Override
         public void run() {
-            // 过滤没开时才自检；开了就靠窗口事件，别白花 binder
             if (!filterOn) refreshForeground();
-            if (guard != null) guard.postDelayed(this, 3000);
+            applyFilter(hitTarget(foregroundPkg));
+            if (guard != null) guard.postDelayed(this, 1000);
         }
     };
-
-    // 发送线程独占
-    private DatagramSocket socket;
-    private InetAddress addr;
-    private long lastResolveAt = 0;
 
     @Override
     protected void onServiceConnected() {
@@ -147,11 +150,7 @@ public class AltTabPipeService extends AccessibilityService {
             }
             worker.interrupt();
         }
-        // 兜底：队列没排空也补一条（只用缓存地址，不做 DNS）
-        if (needRelease) sendDirect(P_RELEASE_ALL);
-
         policy.reset();
-        closeSocket();
     }
 
     @Override
@@ -243,6 +242,7 @@ public class AltTabPipeService extends AccessibilityService {
 
     @Override
     public boolean onKeyEvent(KeyEvent event) {
+        if (shuttingDown || authenticatedPeer != peer) return false;
         final long t0 = System.nanoTime();
         try {
             final int code = event.getKeyCode();
@@ -295,6 +295,7 @@ public class AltTabPipeService extends AccessibilityService {
     // ---------- 过滤开关 ----------
 
     private void applyFilter(boolean on) {
+        on = on && authenticatedPeer == peer;
         try {
             AccessibilityServiceInfo info = getServiceInfo();
             if (info == null) return;
@@ -346,87 +347,68 @@ public class AltTabPipeService extends AccessibilityService {
         worker = new Thread(new Runnable() {
             @Override
             public void run() {
-                while (running || !queue.isEmpty()) {
-                    byte[] p = null;
-                    try {
-                        p = queue.poll(150);
-                    } catch (InterruptedException e) {
-                        break;
-                    }
-                    if (p != null) {
-                        sendNow(p);
-                        continue;
-                    }
-                    // 队列排空后才补发释放，保证它排在已入队报文之后
-                    if (queue.takeResync()) {
-                        resyncCount++;
-                        Log.i(TAG, "resync: 补发 RELEASE_ALL");
-                        sendNow(P_RELEASE_ALL);
-                    }
-                }
-                if (queue.takeResync()) {
-                    resyncCount++;
-                    sendNow(P_RELEASE_ALL);
-                }
+                sendLoop();
             }
         }, "alttab-sender");
         worker.setDaemon(true);
         worker.start();
     }
 
-    private void sendNow(byte[] payload) {
+    private void sendLoop() {
+        PairedUdp channel = null;
+        Peer active = null;
+        long nextHandshake = 0;
         try {
-            if (shuttingDown && addr == null) {
-                // 退出阶段不解析域名，避免拖住
-                return;
+            while (running || !queue.isEmpty()) {
+                Peer configured = peer;
+                if (active != configured) {
+                    releaseAndClose(channel);
+                    channel = null;
+                    active = configured;
+                    nextHandshake = 0;
+                }
+                try {
+                    long now = SystemClock.elapsedRealtime();
+                    if (running && now >= nextHandshake && !active.host.isEmpty()
+                            && PairedUdp.isPairingCode(active.code)) {
+                        if (channel == null) {
+                            channel = new PairedUdp(active.code, InetAddress.getByName(active.host), active.port);
+                        }
+                        if (!channel.authenticate()) throw new java.io.IOException("Pairing rejected");
+                        authenticatedPeer = active;
+                        nextHandshake = now + 2000;
+                    }
+                    byte[] payload = queue.poll(150);
+                    if (active != peer || authenticatedPeer != active || channel == null) continue;
+                    if (payload == null && queue.takeResync()) {
+                        payload = P_RELEASE_ALL;
+                        resyncCount++;
+                    }
+                    if (payload != null) {
+                        channel.send(payload);
+                        sentCount++;
+                    }
+                } catch (InterruptedException e) {
+                    break;
+                } catch (Exception e) {
+                    failCount++;
+                    authenticatedPeer = null;
+                    releaseAndClose(channel);
+                    channel = null;
+                    queue.clear();
+                    nextHandshake = SystemClock.elapsedRealtime() + 1500;
+                }
             }
-            if (socket == null || socket.isClosed()) {
-                socket = new DatagramSocket();
-            }
-            InetAddress a = resolve(false);
-            if (a == null) {
-                failCount++;
-                return;
-            }
-            socket.send(new DatagramPacket(payload, payload.length, a, port));
-            sentCount++;
-        } catch (Throwable t) {
-            failCount++;
-            closeSocket();
+        } finally {
+            authenticatedPeer = null;
+            releaseAndClose(channel);
         }
     }
 
-    /** 退出兜底：只用已缓存的地址，不做 DNS、不阻塞 */
-    private void sendDirect(byte[] payload) {
-        try {
-            if (addr == null) return;
-            if (socket == null || socket.isClosed()) socket = new DatagramSocket();
-            socket.send(new DatagramPacket(payload, payload.length, addr, port));
-            sentCount++;
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private InetAddress resolve(boolean force) {
-        if (addr != null && !force) return addr;
-        long now = SystemClock.elapsedRealtime();
-        if (!force && now - lastResolveAt < 5000) return null;
-        lastResolveAt = now;
-        try {
-            addr = InetAddress.getByName(host);
-            return addr;
-        } catch (Throwable t) {
-            addr = null;
-            return null;
-        }
-    }
-
-    private void closeSocket() {
-        try {
-            if (socket != null) socket.close();
-        } catch (Throwable ignored) {
-        }
-        socket = null;
+    private static void releaseAndClose(PairedUdp channel) {
+        if (channel == null) return;
+        try { channel.send(P_RELEASE_ALL); } catch (Exception ignored) { }
+        channel.close();
     }
 
     // ---------- 配置 ----------
@@ -435,12 +417,19 @@ public class AltTabPipeService extends AccessibilityService {
         android.content.SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
         applyConfig(p.getString("host", ""),
                 p.getInt("port", DEFAULT_PORT),
-                p.getString("targets", DEFAULT_TARGETS));
+                p.getString("targets", DEFAULT_TARGETS),
+                p.getString("pairingCode", ""));
     }
 
-    void applyConfig(String hostV, int portV, String targetSpecV) {
-        host = hostV == null ? "" : hostV;
-        port = portV > 0 ? portV : DEFAULT_PORT;
+    void applyConfig(String hostV, int portV, String targetSpecV, String code) {
+        int port = portV > 0 && portV <= 65535 ? portV : DEFAULT_PORT;
+        Peer previous = peer;
+        if (!previous.host.equals(hostV) || previous.port != port || !previous.code.equals(code)) {
+            authenticatedPeer = null;
+            queue.clear();
+            policy.reset();
+            peer = new Peer(hostV, port, code);
+        }
         targetSpec = targetSpecV == null ? "" : targetSpecV;
         String[] parts = targetSpec.split(",");
         java.util.ArrayList<String> keep = new java.util.ArrayList<String>();
@@ -450,8 +439,6 @@ public class AltTabPipeService extends AccessibilityService {
             if (s.length() > 0) keep.add(s);
         }
         targets = keep.toArray(new String[0]);
-        addr = null;
-        lastResolveAt = 0;
         dropCount = queue.drops();
     }
 

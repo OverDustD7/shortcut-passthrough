@@ -22,14 +22,14 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.nio.charset.StandardCharsets;
 
 public class MainActivity extends Activity {
 
     private EditText hostBox;
     private EditText portBox;
+    private EditText pairingBox;
     private EditText targetsBox;
     private TextView status;
     private SharedPreferences prefs;
@@ -72,6 +72,15 @@ public class MainActivity extends Activity {
         portBox.setText(String.valueOf(prefs.getInt("port", AltTabPipeService.DEFAULT_PORT)));
         root.addView(portBox);
 
+        root.addView(label("配对码（从 Windows 主机复制，留空停用转发）"));
+        pairingBox = new EditText(this);
+        pairingBox.setSingleLine(true);
+        pairingBox.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        pairingBox.setSaveEnabled(false);
+        pairingBox.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+        pairingBox.setText(prefs.getString("pairingCode", ""));
+        root.addView(pairingBox);
+
         root.addView(label("接管名单（包名前缀，逗号分隔。留空=不接管；填 * = 接管所有应用，会拖慢打字）"));
         targetsBox = new EditText(this);
         targetsBox.setSingleLine(true);
@@ -85,7 +94,7 @@ public class MainActivity extends Activity {
         save.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                saveCfg();
+                if (!saveCfg()) return;
                 Toast.makeText(MainActivity.this, "已保存", Toast.LENGTH_SHORT).show();
                 refresh();
             }
@@ -93,11 +102,11 @@ public class MainActivity extends Activity {
         root.addView(save);
 
         Button test = new Button(this);
-        test.setText("发送一次测试包");
+        test.setText("验证主机配对");
         test.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                saveCfg();
+                if (!saveCfg()) return;
                 send("PING");
             }
         });
@@ -210,7 +219,13 @@ public class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (applyIntentConfig(intent, false)) refresh();
+        if (applyIntentConfig(intent, false)) {
+            hostBox.setText(prefs.getString("host", ""));
+            portBox.setText(String.valueOf(prefs.getInt("port", AltTabPipeService.DEFAULT_PORT)));
+            targetsBox.setText(prefs.getString("targets", AltTabPipeService.DEFAULT_TARGETS));
+            pairingBox.setText(prefs.getString("pairingCode", ""));
+            refresh();
+        }
     }
 
     /** 从启动参数里取配置；返回是否改动过。force=true 时连 host 为空也写入 */
@@ -222,7 +237,11 @@ public class MainActivity extends Activity {
         if (ih == null && ip <= 0 && it == null) return false;
         SharedPreferences.Editor ed = prefs.edit();
         if (ih != null) ed.putString("host", ih.trim());
-        if (ip > 0) ed.putInt("port", ip);
+        if (ip > 0 && ip <= 65535) ed.putInt("port", ip);
+        if ((ih != null && !ih.trim().equals(prefs.getString("host", "")))
+                || (ip > 0 && ip <= 65535 && ip != prefs.getInt("port", AltTabPipeService.DEFAULT_PORT))) {
+            ed.remove("pairingCode");
+        }
         if (it != null) ed.putString("targets", it.trim());
         ed.apply();
         AltTabPipeService s = AltTabPipeService.instance;
@@ -230,7 +249,12 @@ public class MainActivity extends Activity {
         return true;
     }
 
-    private void saveCfg() {
+    private boolean saveCfg() {
+        String code = pairingBox.getText().toString().trim();
+        if (!code.isEmpty() && !PairedUdp.isPairingCode(code)) {
+            pairingBox.setError("配对码应为 64 位十六进制字符");
+            return false;
+        }
         SharedPreferences.Editor e = prefs.edit();
         e.putString("host", hostBox.getText().toString().trim());
         int port = AltTabPipeService.DEFAULT_PORT;
@@ -238,11 +262,17 @@ public class MainActivity extends Activity {
             port = Integer.parseInt(portBox.getText().toString().trim());
         } catch (Exception ignored) {
         }
+        if (port < 1 || port > 65535) {
+            portBox.setError("端口应在 1–65535 之间");
+            return false;
+        }
         e.putInt("port", port);
+        e.putString("pairingCode", code);
         e.putString("targets", targetsBox.getText().toString().trim());
         e.apply();
         AltTabPipeService s = AltTabPipeService.instance;
         if (s != null) s.reloadConfig();
+        return true;
     }
 
     private boolean a11yEnabled() {
@@ -357,23 +387,27 @@ public class MainActivity extends Activity {
     private void send(final String payload) {
         final String host = prefs.getString("host", "");
         final int port = prefs.getInt("port", AltTabPipeService.DEFAULT_PORT);
+        final String code = prefs.getString("pairingCode", "");
         if (host.length() == 0) {
             Toast.makeText(this, "先填主机地址", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (!PairedUdp.isPairingCode(code)) {
+            toast("先填写 Windows 主机的配对码");
             return;
         }
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
-                DatagramSocket s = null;
-                try {
-                    s = new DatagramSocket();
-                    byte[] msg = payload.getBytes("UTF-8");
-                    s.send(new DatagramPacket(msg, msg.length, InetAddress.getByName(host), port));
-                    toast("已发送 " + payload + " → " + host + ":" + port);
+                try (PairedUdp channel = new PairedUdp(code, InetAddress.getByName(host), port)) {
+                    if (!channel.authenticate()) {
+                        toast("主机配对验证失败");
+                        return;
+                    }
+                    channel.send(payload.getBytes(StandardCharsets.US_ASCII));
+                    toast("主机配对验证通过，已发送测试包");
                 } catch (Exception e) {
-                    toast("发送失败：" + e);
-                } finally {
-                    if (s != null) s.close();
+                    toast("无法验证主机，请检查网络、接收器和配对码");
                 }
             }
         });

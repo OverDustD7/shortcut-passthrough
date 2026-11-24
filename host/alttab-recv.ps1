@@ -16,6 +16,11 @@ param(
     [string]$Log = (Join-Path $PSScriptRoot 'alttab-recv.log')
 )
 
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'pairing-code.ps1')
+Add-Type -Path (Join-Path $PSScriptRoot 'PairedUdpReceiver.cs')
+$pairedReceiver = New-Object PairedUdpReceiver (Read-PairingCode)
+
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -209,7 +214,10 @@ Write-Log "ready"
 
 $buf = New-Object byte[] 512
 while ($true) {
-    $remote = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::IPv6Any, 0)
+    $tick = [KeyRelay]::Tick()
+    if ($tick) { Write-Log $tick }
+    $any = if ($sock.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6) { [Net.IPAddress]::IPv6Any } else { [Net.IPAddress]::Any }
+    $remote = New-Object System.Net.IPEndPoint($any, 0)
     try {
         $n = $sock.ReceiveFrom($buf, [ref]$remote)
         if ($n -le 0) { continue }
@@ -222,7 +230,15 @@ while ($true) {
         continue
     }
 
-    $text = [System.Text.Encoding]::UTF8.GetString($buf, 0, $n).Trim()
+    $wire = [Text.Encoding]::ASCII.GetString($buf, 0, $n)
+    $challenge = $pairedReceiver.Challenge($wire)
+    if ($challenge) {
+        try { [void]$sock.SendTo([Text.Encoding]::ASCII.GetBytes($challenge), $remote) }
+        catch [System.Net.Sockets.SocketException] { }
+        continue
+    }
+    $text = $pairedReceiver.Open($wire)
+    if (-not $text) { continue }
     if ($text -eq 'ALT_TAB' -or $text -eq 'ALT_TAB_REV') {
         $r = [AltTabInject]::Fire($text -eq 'ALT_TAB_REV')
         Write-Log ("ALT  $text from " + $remote.Address + " -> $r")
@@ -236,7 +252,5 @@ while ($true) {
         Write-Log ("REL  RELEASE_ALL from " + $remote.Address + " -> $r")
     } elseif ($text -eq 'PING') {
         Write-Log ("PING from " + $remote.Address + " (tablet can reach this host)")
-    } else {
-        Write-Log ("?    '" + $text + "' from " + $remote.Address)
     }
 }

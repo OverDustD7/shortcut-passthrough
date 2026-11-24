@@ -5,7 +5,7 @@
 #   JAVA_HOME                          -> JDK 8+ (17 tested)
 #
 #   .\build.ps1
-#   .\build.ps1 -Sdk D:\Android\Sdk -Jdk 'C:\Program Files\Java\jdk-17'
+#   .\build.ps1 -Sdk '{{ANDROID_SDK}}' -Jdk '{{JDK_DIR}}'
 param(
     [string]$Sdk = $env:ANDROID_HOME,
     [string]$Jdk = $env:JAVA_HOME
@@ -15,7 +15,7 @@ $ErrorActionPreference = 'Continue'
 $proj = $PSScriptRoot
 
 if (-not $Sdk) { $Sdk = $env:ANDROID_SDK_ROOT }
-foreach ($cand in @($Sdk, 'C:\Android\Sdk', (Join-Path $env:LOCALAPPDATA 'Android\Sdk'))) {
+foreach ($cand in @($Sdk, (Join-Path $env:LOCALAPPDATA 'Android\Sdk'))) {
     if (-not $Sdk -and $cand -and (Test-Path (Join-Path $cand 'build-tools'))) { $Sdk = $cand }
 }
 if (-not $Sdk -or -not (Test-Path (Join-Path $Sdk 'build-tools'))) {
@@ -33,7 +33,7 @@ $plat = Get-ChildItem (Join-Path $Sdk 'platforms') -Directory |
 if (-not $plat) { throw "no platform under $Sdk\platforms" }
 $ajar = Join-Path $plat.FullName 'android.jar'
 
-foreach ($cand in @($Jdk, 'C:\Program Files\Java\jdk-17', 'C:\Program Files\Android\Android Studio\jbr')) {
+foreach ($cand in @($Jdk, (Join-Path $env:ProgramFiles 'Java\jdk-17'), (Join-Path $env:ProgramFiles 'Android\Android Studio\jbr'))) {
     if (-not $Jdk -and $cand -and (Test-Path (Join-Path $cand 'bin\javac.exe'))) { $Jdk = $cand }
 }
 if (-not $Jdk -or -not (Test-Path (Join-Path $Jdk 'bin\javac.exe'))) {

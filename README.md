@@ -1,134 +1,113 @@
 # shortcut-passthrough
 
-[![GitHub](https://img.shields.io/badge/GitHub-OverDustD7%2Fshortcut--passthrough-24292e)](https://github.com/OverDustD7/shortcut-passthrough)
-
 English | [简体中文](README.zh-CN.md)
 
-Forward Alt+Tab and every Win-key combination from an Android tablet's physical keyboard to a Windows host, without root and without touching Moonlight or any other remote-desktop client. The tablet keeps showing the stream instead of jumping to its own recents screen.
+[![Release](https://img.shields.io/github/v/release/OverDustD7/shortcut-passthrough?style=flat)](https://github.com/OverDustD7/shortcut-passthrough/releases)
+[![Android](https://img.shields.io/badge/Android-8%2B-3DDC84?style=flat)](#requirements)
+[![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D4?style=flat)](#requirements)
+[![License](https://img.shields.io/badge/License-MIT-blue?style=flat)](LICENSE)
+[![GitHub source](https://img.shields.io/badge/GitHub-source-24292e?style=flat)](https://github.com/OverDustD7/shortcut-passthrough)
 
-The Android input dispatcher consumes Alt+Tab at `interceptKeyBeforeDispatching` and Win combinations even earlier, at `interceptKeyBeforeQueueing`, so a remote-desktop client never receives them.
+Forward Alt+Tab and Win-key combinations from an Android tablet's physical keyboard to a Windows host, using an accessibility service and a UDP receiver. No root or remote-desktop client modification is required.
 
-## Why this exists
+## Status and support
 
-There is no setting for this in Moonlight, because Moonlight never gets the chance. The keys are gone before any app sees them:
+The release badge identifies the published APK. Paired transport is in the 1.7 source and requires a matching 1.7 APK and Windows host directory.
 
-- **Alt+Tab** is bound by Android itself to the recent-apps switcher. Pressing it opens the tablet's own task switcher, the remote-desktop window loses focus, and the stream stalls. The client is not misconfigured; the event never reaches it.
-- **Win combinations** (Win, Win+D, Win+E, Win+Shift+S and the rest) are consumed during system-level key handling. Ordinary apps, remote-desktop clients included, are not in the chain at that point.
-- Moonlight's in-app "send special keys" panel is the one workaround that works, because the client synthesises the keystroke itself. It needs a tap on the screen, and a physical key press still takes the path described above.
-
-So what is missing is not a checkbox but the ability to take the key **before the system consumes it**. This project adds exactly that layer. The tablet side intercepts the keys, the host side presses the real thing. No root, no client changes.
-
-Implementation: the app sits on the accessibility key filter, which runs between those two stages. It swallows the keys there, sends them over UDP, and a host script replays them with `keybd_event`.
+Alt+Tab can be consumed on the tablet. Win combinations may still act on the tablet as well as the host. The recorded device verification used Moonlight; other clients and vendor Android builds need their own checks.
 
 ## Requirements
 
-- Tablet: Android 8.0 (API 26) or newer, a physical keyboard, and the remote-desktop client you want to keep (verified with Moonlight).
-- Host: Windows 10/11 with Windows PowerShell 5.1.
-- Building from source: an Android SDK with `build-tools` and one `platforms/android-*`, plus JDK 8 or newer (17 tested). No Gradle and no network access are needed.
+- Android 8.0 / API 26 or later, a physical keyboard and permission to enable the accessibility service.
+- Windows 10/11 with Windows PowerShell 5.1 for the receiver.
+- A trusted network and a pairing code shared between the tablet and Windows host.
+- For building: a preinstalled Android SDK with build-tools and an Android platform, plus a compatible JDK. JDK 17 was used in the recorded build; the minimum JDK version has not been revalidated.
 
 ## Installation
 
-### From the release APK (recommended)
+Build and install the 1.7 APK from this source, or use a matching [Release](https://github.com/OverDustD7/shortcut-passthrough/releases) when available. If Android blocks the sideloaded accessibility service, review the app's restricted-settings controls before enabling it.
 
-Download `shortcut-passthrough.apk` from the [latest release](https://github.com/OverDustD7/shortcut-passthrough/releases/latest) and install it on the tablet. On Android 13 and newer, a sideloaded app first needs *Allow restricted settings* in its app info before the accessibility service can be enabled.
+For Windows, obtain the complete `host/` directory from the same source checkout. Keep the full directory in an ASCII-only path. Run the pairing setup as the Windows user who will run the receiver:
 
-### From source
+~~~powershell
+.\host\setup-pairing.ps1
+.\host\setup-pairing.ps1 -Show
+.\host\install-autostart.ps1
+~~~
 
-```powershell
-$env:ANDROID_HOME = 'C:\Android\Sdk'          # or pass -Sdk
-$env:JAVA_HOME    = 'C:\Program Files\Java\jdk-17'
+This starts a hidden receiver and creates a current-user Startup entry. It does not install a Windows service or scheduled task. Success is reported only when the newly started process owns the selected UDP port.
+
+The installer refuses an unrelated port owner or an unrecognized Startup entry. If Windows does not permit the necessary identity queries, it stops rather than guessing which process to terminate.
+
+## Quick start
+
+1. Open **Shortcut Passthrough** on the tablet.
+2. Enter the Windows host address without a port or brackets, the UDP port (default `47823`), the host pairing code, and target package prefixes such as `com.limelight`. Tap **Verify host pairing** to check the connection.
+3. Enable the accessibility service. An empty target list means no interception; `*` enables interception in every app.
+4. Press Alt+Tab and the required Win combinations while the target app is foreground.
+
+The app reports the service/filter state and packet counters. Check that the host receives the intended shortcut and that leaving the target app releases held keys. A packet counter alone does not prove successful host input.
+
+## Configuration, data and permissions
+
+The Android app uses accessibility/window information to identify the foreground app and filter shortcut events. It requests network and foreground-service permissions, notification permission and an optional battery-optimization exemption. Configuration and diagnostics stay in app storage or memory; Android backup is disabled in the manifest.
+
+Shortcut events are sent to the configured host. The receiver logs packet types, key codes and remote addresses locally. Foreground-package information, addresses, logs and screenshots can reveal usage information; redact them before sharing.
+
+The tablet and receiver verify the shared code before forwarding. Each command is encrypted with AES-256-CBC and authenticated with HMAC-SHA256 using separate keys. The receiver rejects legacy plaintext, wrong keys, invalid tags, repeated or out-of-order sequence numbers and frames from an earlier receiver run. Store the code privately. Windows stores it with current-user DPAPI, and Android stores it in the app’s private settings. Restrict the UDP port to the tablet on the local network.
+
+The APK is debug-signed using the project's debug keystore. This is not a private production signing identity. A stronger distribution/signing policy remains a separate requirement.
+
+## Upgrade and uninstall
+
+Keep the complete host directory together when updating it. Before replacing a signing key, review Android's upgrade and data-retention requirements; this project does not rotate keys automatically.
+
+To remove this checkout's Startup entry and receiver:
+
+~~~powershell
+.\host\install-autostart.ps1 -Uninstall
+~~~
+
+Use the same `-Port` value if you installed with a custom port. The ownership check requires the exact script, trusted PowerShell executable, current user/session, arguments and process creation identity. Unrecognized launches are preserved for manual review.
+
+Host logs and source files are retained. Disable the accessibility service and uninstall the Android app to remove that side; app-local settings are removed by normal Android uninstall behavior.
+
+## Limitations and troubleshooting
+
+- Win shortcuts can still affect Android; suppressing all vendor system handling is outside this app's non-root design.
+- The accessibility key filter adds a per-key round trip while active.
+- UDP is best effort. Local send ordering and the host's eight-second stuck-key watchdog do not guarantee packet delivery.
+- If the service is enabled but disconnected after reinstall, toggle the accessibility service and recheck its status.
+- Keyboard only, one direction. This is not a mouse or general text-input transport.
+- A conflicting port or unrecognized Startup entry is not overwritten or stopped. Review the owner manually or choose a separate port.
+- Update both ends together. The 1.6 plaintext protocol is incompatible with 1.7 pairing. Production signing remains a separate release requirement.
+
+## Development
+
+Build from source with local SDK/JDK paths:
+
+~~~powershell
+$env:ANDROID_HOME = '{{ANDROID_SDK}}'
+$env:JAVA_HOME = '{{JDK_DIR}}'
 .\build.ps1
-# -> build\shortcut-passthrough.apk
-```
+~~~
 
-The script picks the newest `build-tools` and `platform`, compiles resources with `aapt2`, compiles with `javac`, dexes with `d8`, aligns, and signs with a local debug keystore created on first run. Nothing outside `build/` is written.
+The build produces `build/shortcut-passthrough.apk` and may create `debug.keystore` at the repository root if it is absent. It uses installed tools and does not download build dependencies.
 
-### Host side
+Run the receiver ownership regression in a fresh Windows PowerShell process:
 
-```powershell
-.\host\install-autostart.ps1              # start now, plus an entry in the Startup folder
-.\host\install-autostart.ps1 -Uninstall   # remove the entry and stop the listener
-```
+~~~powershell
+powershell.exe -NoLogo -NoProfile -File .\test\ReceiverIdentityTest.ps1
+~~~
 
-The listener runs as an ordinary hidden PowerShell process under your own account. No administrator rights, scheduled task, or service is involved.
+The test uses synthetic metadata plus a self-owned sleeping process. It does not start the keyboard receiver, open a UDP listener, install Startup entries or inject keys.
 
-## Usage
+[Implementation notes and previous device verification](docs/IMPLEMENTATION.en.md) preserve the dispatcher/filter explanation, protocol, queue/release handling, recorded measurements and repository layout. Those device measurements are historical, not a new device acceptance run.
 
-1. Open **Shortcut Passthrough** on the tablet and fill in:
-   - **host address** — one of the addresses printed by the host script, IPv4 or IPv6, without a port and without brackets;
-   - **port** — default `47823`;
-   - **target packages** — package prefixes that may take over keys, default `com.limelight`. Empty means *never intercept*, which is the safe default; write `*` only if you want interception in every app.
-2. Enable the accessibility service. The in-app button opens the settings page directly.
-3. Press Alt+Tab, Win, Win+D, Win+Shift+S, Win+E on the keyboard.
+## Feedback and security
 
-The app's home screen shows the filter state, the current foreground package, a history of recently seen packages, callback timing, packet counters, and a self-check button. All of it stays on the device.
+Use [Issues](https://github.com/OverDustD7/shortcut-passthrough/issues) for non-sensitive bugs. No private security-reporting channel is advertised. Do not post keystrokes, private addresses, accounts, full logs or unredacted screenshots publicly.
 
-## How it works
+## License and third-party notices
 
-```
-tablet keyboard -> accessibility key filter -> UDP -> host script -> keybd_event
-```
-
-- The key filter is only requested while a target package is in the foreground. Having a filter on at all makes every physical key wait for a synchronous round trip into the app, so outside the target app it is switched off and ordinary typing never touches it.
-- The foreground package is read from `getRootInActiveWindow()`, falling back to application windows from `getWindows()`, and never from the event's package name. Notifications, input methods, and system dialogs also emit window events; trusting their package name switched the filter off by accident and made interception intermittent.
-- The key callback does integer checks and one queue offer: no string building, no preferences, no DNS, no network.
-- Releases are decided by ownership, meaning which keys this app actually swallowed, not by the current modifier state. Otherwise `Win down, D down, Win up, D up` would drop the final `D up`.
-- Sending happens on one worker thread with one socket, so order is preserved and the input callback never blocks on the network.
-- When the queue is full, a lost critical packet (a release) becomes a deferred `RELEASE_ALL`; a lost ordinary packet is dropped.
-- Leaving the target app, unbinding the service, or shutting down sends `RELEASE_ALL`, so the host cannot keep a key pressed.
-
-## Protocol
-
-| Packet | Meaning |
-|---|---|
-| `ALT_TAB` / `ALT_TAB_REV` | host injects Alt+Tab / Shift+Alt+Tab |
-| `KEY <androidKeyCode> <1\|0>` | press or release the matching Windows key |
-| `RELEASE_ALL` | release everything the host is holding |
-| `PING` | log only, for reachability checks |
-
-UDP is best effort. What is guaranteed is the local send order; a lost packet is covered by the host's 8-second stuck-key watchdog, not by retransmission.
-
-## Verification
-
-Emulator running Android 15 (API 35), driven with real kernel key events through `sendevent`:
-
-| Scenario | Result |
-|---|---|
-| target app not in the foreground | no callback, no packet |
-| target app in the foreground, 30 plain characters | callback at most 27 microseconds warm (2.4 milliseconds on the first cold key), nothing sent |
-| `Win down, D down, Win up, D up` | four packets, correct order, final release present |
-| `Alt down, Tab down, Alt up, Tab up` | exactly one `ALT_TAB`, no leaked `Tab` up |
-| system notification posted, then Alt+Tab | still forwarded; a system window no longer disables the filter |
-| leaving the target app | `filter=false` and `RELEASE_ALL -> released 1 held key(s)` |
-| host unreachable or DNS unresolvable | callback stays around 0.1 milliseconds, the process never blocks |
-
-`KeyPolicy` and `ReleaseSafeQueue` are plain Java and covered by `test/PipeCoreTest.java`, which runs on the JVM without a device: `pass=9 fail=0`.
-
-## Limitations
-
-- **Win combinations still act on the tablet as well.** The system handles Meta before any app can intercept it. This app makes the host react; it cannot stop the device. Suppressing the device side needs root, for example an Xposed module that disables the vendor's Win hotkeys, or a keyboard that does not send those keys.
-- While streaming the filter must stay on, so that per-key round trip cannot be removed, only kept short.
-- If the service reads as enabled but nothing happens, toggle the accessibility service off and on. A reinstall can leave it enabled but unbound, which the app reports as *service instance: not connected*.
-- Keyboard only, one direction. Mouse and text input are not touched.
-
-## Repository layout
-
-```
-AndroidManifest.xml           tablet app, built without Gradle
-build.ps1
-res/                          strings and accessibility service config
-src/top/overdustd7/alttabpipe/
-    AltTabPipeService.java      accessibility service, filter and foreground handling
-    KeyPolicy.java              key ownership, pure Java
-    ReleaseSafeQueue.java       send queue with release recovery, pure Java
-    MainActivity.java           configuration and diagnostics
-test/PipeCoreTest.java        JVM tests, no device needed
-host/
-    alttab-recv.ps1             UDP listener and key injection
-    serve-apk.ps1               one-file HTTP page for getting the APK onto the tablet
-    install-autostart.ps1       detached start plus logon autostart
-```
-
-## License
-
-MIT, see [LICENSE](LICENSE).
+MIT; see [LICENSE](LICENSE). Existing copyright notices remain in that file. Referenced remote-desktop clients are separate projects and are not bundled here.
